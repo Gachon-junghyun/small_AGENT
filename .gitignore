@@ -1,0 +1,15 @@
+# 개인 데이터 — 커밋하지 않는다
+domains/
+research/
+out/
+*.local.*
+
+# 스크린샷·내려받은 그림 (개인정보가 찍힌다)
+shots/
+*.png
+!docs/*.png
+
+# 파이썬
+__pycache__/
+*.pyc
+.venv/

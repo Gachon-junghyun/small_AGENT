@@ -1,0 +1,137 @@
+{
+  "_README": [
+    "'어떤 정보가 어디 있고, 거기서 뭘 할 수 있고, 바로 들어가는 URL 이 뭔지' 지도.",
+    "sites.json(로그인 판정)이 '로그인 됐나?' 라면, 이 파일은 '어디로 가서 뭘 하나?' 다.",
+    "",
+    "access 4종:",
+    "  open    — 로그인 없이 그냥 된다.",
+    "  session — 사람이 디버그 프로필에 1회 로그인해두면 그 뒤로 에이전트가 계속 볼 수 있다.",
+    "  api     — 브라우저보다 공식 API 가 낫다. prefer 필드 참고.",
+    "  blocked — 하지 마라. 약관 위반이거나 계정이 날아간다. why 필드에 이유.",
+    "",
+    "has = 볼 수 있는 것 / can = 할 수 있는 것(되돌릴 수 없는 행동 — 실행 직전에 사람에게 묻는다).",
+    "login = sites.json 의 키(세션 판정용). recipes = `fast recipe <사이트> <이름>` 으로 돌리는 반복 절차.",
+    "",
+    "쓰는 법:  python -m module_browser find 뉴스",
+    "          python -m module_browser go github 알림",
+    "          python -m module_browser fast recipe hacker_news 프론트",
+    "",
+    "★ 이 파일엔 비밀이 없다. 자격증명은 %USERPROFILE%\\.agent_creds 에만 있다.",
+    "★ 새로 간 사이트는 끝나고 여기 등록하고, 밟은 함정은 리포 루트 LESSONS.md 에 적는다."
+  ],
+
+  "hacker_news": {
+    "label": "Hacker News",
+    "access": "open",
+    "has": ["기술 뉴스", "토론 스레드", "Show/Ask HN"],
+    "go": {
+      "프론트": "https://news.ycombinator.com/",
+      "신규": "https://news.ycombinator.com/newest",
+      "검색": "https://hn.algolia.com/?q={검색어}"
+    },
+    "prefer": "https://hacker-news.firebaseio.com/v0/topstories.json — 무료·무키. 목록만 필요하면 이쪽이 싸다",
+    "recipes": {
+      "_왜": "레시피가 어떻게 생겼나 보여주는 예시다. 로그인이 필요 없어서 아무 PC 에서나 돈다.",
+      "프론트": {
+        "steps": [
+          ["goto", "https://news.ycombinator.com/", "!!document.querySelector('tr.athing')"],
+          ["eval", "Array.from(document.querySelectorAll('tr.athing')).slice(0,30).map(r=>({rank:((r.querySelector('.rank')||{}).innerText||'').replace('.',''),title:(r.querySelector('.titleline a')||{}).innerText||'',url:(r.querySelector('.titleline a')||{}).href||''}))"]
+        ]
+      }
+    }
+  },
+
+  "namuwiki": {
+    "label": "나무위키",
+    "access": "open",
+    "has": ["국내 한정 주제의 전체 판도", "서비스/앱 연혁", "사건사고 연표", "커뮤니티 용어"],
+    "go": {
+      "문서": "https://namu.wiki/w/{문서제목}",
+      "검색": "https://namu.wiki/Search?q={검색어}"
+    },
+    "note": "로그인·캡차 없이 innerText 로 통째로 읽힌다. 국내에서만 쓰는 것을 조사할 땐 검색 결과 10개를 여는 것보다 싸다. ★ 각주 뒤에 광고 텍스트가 본문처럼 섞인다. ★ 검증 안 된 위키다 — 날짜·수치는 공식 출처로 2차 확인."
+  },
+
+  "wikipedia": {
+    "label": "위키백과",
+    "access": "api",
+    "has": ["개념 정의", "연표", "인물·기관 개요"],
+    "go": {
+      "문서": "https://ko.wikipedia.org/wiki/{문서제목}"
+    },
+    "prefer": "REST API — https://ko.wikipedia.org/api/rest_v1/page/summary/{문서제목} (요약) · /page/html/{문서제목} (본문). 브라우저 불필요"
+  },
+
+  "github": {
+    "label": "GitHub",
+    "access": "session",
+    "has": ["저장소", "이슈/PR", "Actions 로그", "알림", "코드"],
+    "can": ["이슈 생성/댓글", "PR 리뷰/머지", "저장소 설정 변경"],
+    "go": {
+      "알림": "https://github.com/notifications",
+      "내PR": "https://github.com/pulls",
+      "저장소": "https://github.com/{소유자}/{저장소}",
+      "리포검색API": "https://api.github.com/search/repositories?q={쿼리}&sort=stars&order=desc&per_page=20",
+      "README원문": "https://raw.githubusercontent.com/{소유자}/{저장소}/main/README.md"
+    },
+    "login": "github",
+    "prefer": "조사·읽기는 공개 REST API + raw.githubusercontent.com. `gh` CLI 가 있으면 그쪽. 브라우저는 마지막 수단.",
+    "note": "새 CDP 프로필 = 새 기기라 최초 1회는 이메일 코드/TOTP 를 사람이 넣어야 한다. 비인증 API 는 검색 10회/분 · 코어 60회/시 — 넘으면 403 이 즉시 떨어진다."
+  },
+
+  "dart": {
+    "label": "DART 전자공시",
+    "access": "open",
+    "has": ["기업 공시 원문", "사업보고서", "재무제표", "지분공시", "주요사항보고"],
+    "go": {
+      "공시검색": "https://dart.fss.or.kr/dsab007/main.do",
+      "당일공시": "https://dart.fss.or.kr/dsac001/mainAll.do"
+    },
+    "prefer": "OpenDART API — https://opendart.fss.or.kr/api/list.json?crtfc_key=<키> (무료). 공시 원문 전문은 .../api/document.xml?crtfc_key=<키>&rcept_no={접수번호} — ZIP 안에 XML.",
+    "note": "로그인은 알림 개인화용일 뿐, 공시 데이터는 전부 익명 접근된다."
+  },
+
+  "kyobobook": {
+    "label": "교보문고",
+    "access": "open",
+    "has": ["책·굿즈 검색", "정가/할인가·재고·배송일", "리뷰", "점포별 영업시간·휴무일"],
+    "go": {
+      "통합검색": "https://search.kyobobook.co.kr/search?keyword={검색어}&gbCode=TOT&target=total",
+      "상품": "https://product.kyobobook.co.kr/detail/{상품ID}"
+    },
+    "note": "로그인·캡차 없이 검색·상품·리뷰가 innerText 로 읽힌다. ★ 목록의 상품 링크는 a[href*='/detail/'] 로만 잡힌다. ★ 상품 설명 상당수가 이미지다 — `alts` 스텝(img alt)으로 카피를 건진다."
+  },
+
+  "naver_map": {
+    "label": "네이버 지도",
+    "access": "open",
+    "has": ["장소 검색(영업시간·전화·주소)", "길찾기", "방문자 리뷰"],
+    "go": {
+      "장소검색": "https://map.naver.com/p/search/{검색어}"
+    },
+    "prefer": "장소 «검색»은 지역검색 오픈API — https://openapi.naver.com/v1/search/local.json?query={검색어} (헤더 X-Naver-Client-Id / X-Naver-Client-Secret, 무료). ★ 한 검색에 5건이 천장이다 — 넘겨야 하면 브라우저 목록으로.",
+    "note": "검색 결과가 iframe 안에 있다 — 본문을 읽으려면 그 iframe 의 src 로 직접 간다."
+  },
+
+  "gemini": {
+    "label": "Google Gemini",
+    "access": "session",
+    "has": ["이미지 생성", "그림 보고 답하기"],
+    "go": { "새대화": "https://gemini.google.com/app" },
+    "note": "/gemini-image 스킬이 쓴다. 로그인은 사람이 디버그 프로필에서 1회. 함정 표는 .claude/skills/gemini-image/SKILL.md."
+  },
+
+  "chatgpt": {
+    "label": "ChatGPT",
+    "access": "session",
+    "has": ["이미지 생성"],
+    "go": { "새대화": "https://chatgpt.com/" },
+    "note": "/chatgpt-image 스킬이 쓴다. 사람이 시킨 것만 대행한다 — 대량 생성 금지(계정이 걸리면 그림 몇 장보다 훨씬 비싸다)."
+  },
+
+  "instagram": {
+    "label": "Instagram",
+    "access": "blocked",
+    "why": "자동 수집은 약관 위반이고 계정·IP 가 바로 막힌다. 볼 게 있으면 사람이 앱으로 본다."
+  }
+}
