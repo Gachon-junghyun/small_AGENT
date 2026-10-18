@@ -128,17 +128,18 @@ class CDP:
         self._id = 0
         self._frame_id = None    # 격리 월드용. 처음 eval 때 한 번 채운다
         self._ctx = None         # 격리 월드 executionContextId. 항해로 죽으면 다시 만든다
+        self.dialogs: list[dict] = []   # 이 세션에서 뜬 JS 다이얼로그. run() 이 스텝마다 비운다
+        self._ready = False              # 붙기 «전»부터 떠 있던 창은 남의 것일 수 있다 — 건드리지 않는다
+        if "/devtools/browser/" not in ws:   # 탭 세션만 (브라우저 전체 세션엔 Page 도메인이 없다)
+            # 🔴 Page.enable 을 해야 `javascriptDialogOpening` 이 온다. 안 하면 alert 하나에 click 30초 +
+            # 다음 eval 30초가 멈추고, handleJavaScriptDialog 도 «No dialog is showing» 이다 (2026-10-18 실측, LESSONS.md).
+            try:
+                self.call("Page.enable", timeout=5)
+            except Exception:
+                pass
+        self._ready = True
 
     # -- WebSocket 프레이밍 (클라이언트→서버는 마스킹 필수) --
-    def _recv(self, n: int) -> bytes:
-        while len(self._buf) < n:
-            chunk = self.s.recv(max(1 << 16, n - len(self._buf)))
-            if not chunk:
-                raise ConnectionError("연결이 닫혔다")
-            self._buf += chunk
-        out, self._buf = self._buf[:n], self._buf[n:]
-        return out
-
     def _send(self, payload: bytes) -> None:
         mask = os.urandom(4)
         n = len(payload)
@@ -151,13 +152,23 @@ class CDP:
         self.s.sendall(hdr + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
 
     def _frame(self) -> tuple[int, bytes]:
-        b0, b1 = self._recv(2)
-        op, n = b0 & 0x0F, b1 & 0x7F
-        if n == 126:
-            n = struct.unpack(">H", self._recv(2))[0]
-        elif n == 127:
-            n = struct.unpack(">Q", self._recv(8))[0]
-        return op, self._recv(n)
+        """프레임 하나. **다 도착하기 전엔 버퍼에서 안 꺼낸다** — 소켓 timeout 이 중간에 끊어도
+        머리만 먹고 몸통을 잃어 스트림이 어긋나는 일이 없다 (call() 이 timeout 을 남은 시간으로 줄인다)."""
+        while True:
+            b = self._buf
+            if len(b) >= 2:
+                op, n, i = b[0] & 0x0F, b[1] & 0x7F, 2
+                if n == 126 and len(b) >= 4:
+                    n, i = struct.unpack(">H", b[2:4])[0], 4
+                elif n == 127 and len(b) >= 10:
+                    n, i = struct.unpack(">Q", b[2:10])[0], 10
+                if (n < 126 or i > 2) and len(b) >= i + n:
+                    self._buf = b[i + n:]
+                    return op, b[i:i + n]
+            chunk = self.s.recv(1 << 16)
+            if not chunk:
+                raise ConnectionError("연결이 닫혔다")
+            self._buf += chunk
 
     # -- CDP --
     def call(self, method: str, params: dict | None = None, timeout: float = 30.0) -> dict:
@@ -166,22 +177,54 @@ class CDP:
         self._send(json.dumps({"id": mid, "method": method,
                                "params": params or {}}).encode("utf-8"))
         deadline = _T() + timeout
-        while _T() < deadline:
-            op, data = self._frame()
-            if op == 0x8:
-                raise ConnectionError("브라우저가 세션을 닫았다")
-            if op == 0x9:          # ping
-                continue
-            msg = json.loads(data)
-            if msg.get("id") == mid:
-                if "error" in msg:
-                    raise RuntimeError(f"{method}: {msg['error']}")
-                return msg.get("result", {})
-            # 그 밖의 이벤트는 흘린다 (Page.* 를 enable 하지 않았으니 거의 안 온다)
+        try:
+            while True:
+                left = deadline - _T()
+                if left <= 0:
+                    break
+                # 🔴 소켓 대기도 남은 시간으로 묶는다. 안 그러면 recv 가 소켓 기본 30초로 블록해서
+                #    timeout=8 을 줘도 30초를 기다린다 (2026-10-18 실측).
+                self.s.settimeout(left)
+                op, data = self._frame()
+                if op == 0x8:
+                    raise ConnectionError("브라우저가 세션을 닫았다")
+                if op == 0x9:          # ping
+                    continue
+                msg = json.loads(data)
+                if msg.get("method") == "Page.javascriptDialogOpening":
+                    self._on_dialog(msg.get("params") or {})
+                    continue
+                if msg.get("id") == mid:
+                    if "error" in msg:
+                        raise RuntimeError(f"{method}: {msg['error']}")
+                    return msg.get("result", {})
+                # 그 밖의 이벤트(Page.* 등)는 흘린다
+        except socket.timeout:
+            pass
         raise TimeoutError(f"{method} 응답 없음 ({timeout}s)")
 
+    def _on_dialog(self, p: dict) -> None:
+        """JS 다이얼로그가 떴다. **alert 는 닫고 계속, 나머지는 «취소»로 닫는다.**
+
+        alert 는 «확인» 하나뿐이라 닫아도 잃는 게 없다. confirm·prompt·beforeunload 는 «무엇을 할까»를
+        묻는 창이라 에이전트가 «확인»을 누르지 않는다 — 취소는 아무 일도 안 일어나는 쪽이다.
+        run() 이 그 스텝을 실패로 남겨 사람이 보게 한다. 닫지 않으면 렌더러가 멈춰 뒤의 모든 호출이 30초씩 문다.
+        붙기 «전»부터 떠 있던 창(`_ready` 전)은 사람이 보고 있는 창일 수 있어 건드리지 않는다.
+        """
+        kind = str(p.get("type", ""))
+        d = {"type": kind, "message": str(p.get("message", ""))[:300]}
+        if not self._ready:
+            d["handled"] = "안 건드림(붙기 전부터 떠 있었다)"
+        else:
+            accept = kind == "alert"
+            self._id += 1      # 응답은 기다리지 않는다 — 다른 id 라 위 루프가 흘린다
+            self._send(json.dumps({"id": self._id, "method": "Page.handleJavaScriptDialog",
+                                   "params": {"accept": accept}}).encode("utf-8"))
+            d["handled"] = "닫음" if accept else "취소"
+        self.dialogs.append(d)
+
     # -- 격리 월드: «메인 월드 실행» 누출을 막는다 (2026-09-16) --
-    def _isolated_ctx(self) -> int:
+    def _isolated_ctx(self, timeout: float = 30.0) -> int:
         """이 프레임의 «격리 월드» executionContextId. 없으면 만든다.
 
         메인 월드(페이지 스크립트가 사는 곳)에서 `Runtime.evaluate` 를 돌리면 페이지가
@@ -193,11 +236,12 @@ class CDP:
           `eval` 이 그 에러를 잡아 한 번 다시 만든다.
         """
         if self._frame_id is None:
-            self._frame_id = self.call("Page.getFrameTree")["frameTree"]["frame"]["id"]
+            # timeout 을 넘긴다 — 안 넘기면 eval(timeout=3) 이 여기서 기본 30초를 문다(창이 떠 있는 탭, 2026-10-18)
+            self._frame_id = self.call("Page.getFrameTree", timeout=timeout)["frameTree"]["frame"]["id"]
         if self._ctx is None:
             r = self.call("Page.createIsolatedWorld",
                           {"frameId": self._frame_id, "worldName": "__agent",
-                           "grantUniveralAccess": True})   # ★ CDP 스펙 원문 철자다(오타가 규격)
+                           "grantUniveralAccess": True}, timeout=timeout)   # ★ CDP 스펙 원문 철자다(오타가 규격)
             self._ctx = r["executionContextId"]
         return self._ctx
 
@@ -221,7 +265,7 @@ class CDP:
         (goto 의 `window.__agent_nav` 도장은 «우리»가 격리 월드에 찍고 격리 월드에서 읽으니 문제없다).
         """
         try:
-            return self._eval_raw(js, self._isolated_ctx(), timeout)
+            return self._eval_raw(js, self._isolated_ctx(timeout), timeout)
         except RuntimeError as e:
             # 항해로 컨텍스트가 죽었으면 stale id 다 — 딱 이 세 문구일 때만 다시 만들고 재시도한다
             # (JS 예외 텍스트를 잘못 잡아 무한 재시도하지 않도록 문구를 좁혔다).
@@ -230,7 +274,7 @@ class CDP:
                 "Cannot find context" in m or "Execution context was destroyed" in m
                 or "uniqueContextId" in m or "Inspected target" in m):
                 self._ctx = None
-                return self._eval_raw(js, self._isolated_ctx(), timeout)
+                return self._eval_raw(js, self._isolated_ctx(timeout), timeout)
             raise
 
     # -- 이동과 대기 --
@@ -434,10 +478,19 @@ def run(steps: list, port: int = DEFAULT_PORT, match: str | None = None,
                 r = round(secs, 2)
             else:
                 raise ValueError(f"모르는 스텝: {op}")
-            out.append({"step": i, "op": op, "ok": True, "result": r})
+            row = {"step": i, "op": op, "ok": True, "result": r}
         except Exception as e:
             # ★ 중간에 실패해도 여태 건진 것은 돌려준다 — 처음부터 다시 하는 게 제일 비싸다.
-            out.append({"step": i, "op": op, "ok": False, "error": f"{type(e).__name__}: {e}"})
+            row = {"step": i, "op": op, "ok": False, "error": f"{type(e).__name__}: {e}"}
+        if c.dialogs:
+            row["dialogs"], c.dialogs = c.dialogs, []
+            asked = [d for d in row["dialogs"] if d["type"] != "alert"]
+            if asked and row["ok"]:
+                row["ok"] = False
+                row["error"] = (f"DialogCancelled: {asked[0]['type']} 창 «{asked[0]['message'][:80]}» — "
+                                f"{asked[0]['handled']}. 진행할지는 사람이 정한다")
+        out.append(row)
+        if not row["ok"]:
             break
     if cdp is None:
         c.close()
@@ -685,5 +738,7 @@ def main(argv: list[str]) -> int:
             _usage()
             return 2
     finally:
+        for d in c.dialogs:
+            print(f"[다이얼로그] {d['type']} «{d['message'][:80]}» → {d['handled']}", file=sys.stderr)
         c.close()
     return 0
